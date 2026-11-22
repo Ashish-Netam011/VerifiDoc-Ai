@@ -1,0 +1,28 @@
+# Python
+.venv/
+node_modules/
+.env
+__pycache__/
+*.pyc
+*.pyw
+data/
+*.index
+*.pkl
+tmp/
+*.temp
+
+# Ollama models
+models/
+*.gguf
+
+# Frontend
+frontend/node_modules/
+frontend/.vite/
+
+# SQL databases
+*.db
+*.sqlite
+
+# OS
+.DS_Store
+Thumbs.db
