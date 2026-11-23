@@ -1,29 +1,56 @@
 # Python
 .venv/
+venv/
 node_modules/
-.env
 __pycache__/
 *.pyc
 *.pyw
+
+# --- Secrets: never commit real credentials ---
+.env
+.env.*
+!.env.example
+!.env.example.*
+!*.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+
+# --- Generated data, indexes and models (stay on disk, never in Git) ---
 data/
 *.index
 *.pkl
 tmp/
 *.temp
-
-# Ollama models
 models/
 *.gguf
+*.npz
 
 # Frontend
 frontend/node_modules/
 frontend/.vite/
+frontend/dist/
 
 # SQL databases
 *.db
 *.sqlite
 
+# --- Runtime logs (may contain document text and request paths) ---
+*.log
+logs/
+
+# --- Local tooling / agent artifacts ---
+.freebuff/
+.cloud-attachments/
+.playwright-mcp/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
 # OS
 .DS_Store
 Thumbs.db
-frontend/dist/
