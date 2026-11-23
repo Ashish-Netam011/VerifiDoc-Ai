@@ -1,6 +1,7 @@
-module.exports = {
+// package.json sets "type": "module", so this config must use ESM syntax.
+export default {
   plugins: {
-    tailwind: {},
+    tailwindcss: {},
     autoprefixer: {},
   },
 }

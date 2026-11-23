@@ -1,5 +1,6 @@
 /** @type {import('tailwindcss').Config} */
-module.exports = {
+// package.json sets "type": "module", so this config must use ESM syntax.
+export default {
   content: [
     "./index.html",
     "./src/**/*.{js,ts,jsx,tsx}",
