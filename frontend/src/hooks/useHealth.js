@@ -63,7 +63,7 @@ export function useHealth({ auto = true } = {}) {
     error,
     checkedAt,
     backendAvailable: health?.backendAvailable ?? false,
-    ollamaAvailable: health?.ollamaAvailable ?? false,
+    providerAvailable: health?.providerAvailable ?? false,
     modelPresent: health?.modelPresent ?? false,
     serviceStatus: health?.serviceStatus ?? null,
     llmUsable: health?.llmUsable ?? false,

@@ -16,12 +16,12 @@ export function AppLayout() {
         <Container className="flex flex-wrap items-center gap-4 py-3">
           <div className="mr-auto flex items-center gap-3">
             <span className="grid h-9 w-9 place-items-center rounded-lg bg-slate-900 text-xs font-semibold text-white">
-              PL
+              VD
             </span>
 
             <div>
               <p className="text-sm font-semibold text-slate-900">
-                ProofLens AI
+                VerifiDoc AI
               </p>
               <p className="text-xs text-slate-500">
                 Evidence-grounded document intelligence
@@ -29,7 +29,10 @@ export function AppLayout() {
             </div>
           </div>
 
-          <nav className="flex items-center gap-1" aria-label="Primary">
+          <nav
+            className="flex w-full flex-wrap items-center gap-1 sm:w-auto"
+            aria-label="Primary"
+          >
             <NavLink to="/" end className={navLinkClass}>
               Documents
             </NavLink>
@@ -40,6 +43,12 @@ export function AppLayout() {
 
             <NavLink to="/search" className={navLinkClass}>
               Search
+            </NavLink>
+            <NavLink to="/conflicts" className={navLinkClass}>
+              Compare
+            </NavLink>
+            <NavLink to="/amendments" className={navLinkClass}>
+              Amendments
             </NavLink>
           </nav>
 

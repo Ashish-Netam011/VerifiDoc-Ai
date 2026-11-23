@@ -47,6 +47,43 @@ def _upload(client: TestClient, path: Path, name: str | None = None):
         )
 
 
+def _write_table_pdf(
+    path: Path,
+    rows: list[list[str]],
+    *,
+    surrounding_text: bool = True,
+) -> Path:
+    document = fitz.open()
+    try:
+        page = document.new_page()
+        if surrounding_text:
+            page.insert_text((40, 45), "Schedule of payment terms", fontsize=10)
+        column_count = len(rows[0])
+        x_positions = [40 + 140 * index for index in range(column_count + 1)]
+        y_positions = [70 + 38 * index for index in range(len(rows) + 1)]
+        for x in x_positions:
+            page.draw_line((x, y_positions[0]), (x, y_positions[-1]), width=1)
+        for y in y_positions:
+            page.draw_line((x_positions[0], y), (x_positions[-1], y), width=1)
+        for row_index, row in enumerate(rows):
+            for column_index, value in enumerate(row):
+                if value:
+                    page.insert_text(
+                        (
+                            x_positions[column_index] + 8,
+                            y_positions[row_index] + 25,
+                        ),
+                        value,
+                        fontsize=9,
+                    )
+        if surrounding_text:
+            page.insert_text((40, y_positions[-1] + 25), "Payment terms apply.", fontsize=10)
+        document.save(path)
+    finally:
+        document.close()
+    return path
+
+
 # -- Task 1: upload ---------------------------------------------------------
 
 
@@ -97,6 +134,104 @@ def test_reject_pdf_without_text(client: TestClient, tmp_path: Path) -> None:
     response = _upload(client, path)
     assert response.status_code == 422
     assert "no extractable text" in response.json()["detail"].lower()
+
+
+def test_extracts_numeric_table_with_page_provenance(tmp_path: Path) -> None:
+    path = _write_table_pdf(
+        tmp_path / "table.pdf",
+        [["Item", "Amount"], ["Rent", "15000"], ["Deposit", "2000"]],
+    )
+
+    extracted = extract_pdf(path, "document-1", "table.pdf")
+
+    assert len(extracted.tables) == 1
+    table = extracted.tables[0]
+    assert table.document_id == "document-1"
+    assert table.filename == "table.pdf"
+    assert table.page_number == 1
+    assert table.table_id == "p0001-t0001"
+    assert table.headers == ("Item", "Amount")
+    assert table.status == "extracted"
+    assert "Rent | 15000" in extracted.pages[0].text
+    assert "Schedule of payment terms" in extracted.pages[0].text
+    assert "Payment terms apply." in extracted.pages[0].text
+
+
+def test_table_cells_preserve_spaces_from_page_text(tmp_path: Path) -> None:
+    path = _write_table_pdf(
+        tmp_path / "spaced-cells.pdf",
+        [["Item", "Amount"], ["Refund fee", "INR 250"]],
+    )
+
+    table = extract_pdf(path, "document-spaced", "spaced-cells.pdf").tables[0]
+
+    assert table.rows[1] == ("Refund fee", "INR 250")
+
+
+def test_multirow_table_preserves_repeated_headers_and_all_rows(tmp_path: Path) -> None:
+    path = _write_table_pdf(
+        tmp_path / "multi.pdf",
+        [
+            ["Item", "Amount"],
+            ["Rent", "15000"],
+            ["Item", "Amount"],
+            ["Deposit", "2000"],
+        ],
+    )
+
+    table = extract_pdf(path, "document-2", "multi.pdf").tables[0]
+
+    assert len(table.rows) == 4
+    assert table.rows[0][0] == "Item"
+    assert table.rows[2][0] == "Item"
+    assert table.rows[3][1] == "2000"
+
+
+def test_incomplete_table_is_flagged_for_review(tmp_path: Path) -> None:
+    path = _write_table_pdf(
+        tmp_path / "incomplete.pdf",
+        [["Item", "Amount"], ["Rent", ""], ["Deposit", "2000"]],
+    )
+
+    table = extract_pdf(path, "document-3", "incomplete.pdf").tables[0]
+
+    assert table.status == "review_required"
+    assert table.review_reason
+    assert table.rows[1][1] in (None, "")
+
+
+def test_ordinary_pdf_keeps_plain_text_extraction_without_tables(tmp_path: Path) -> None:
+    path = _write_pdf(tmp_path / "plain.pdf", ["No table on this page."])
+
+    extracted = extract_pdf(path, "document-4", "plain.pdf")
+
+    assert extracted.tables == ()
+    assert extracted.pages[0].text.strip() == "No table on this page."
+
+
+def test_uploaded_table_is_exposed_and_searchable(
+    client: TestClient, tmp_path: Path
+) -> None:
+    path = _write_table_pdf(
+        tmp_path / "indexed-table.pdf",
+        [["Item", "Amount"], ["Rent", "15000"]],
+        surrounding_text=False,
+    )
+    uploaded = _upload(client, path)
+    assert uploaded.status_code == 201, uploaded.text
+    document_id = uploaded.json()["document_id"]
+
+    response = client.get(f"/api/documents/{document_id}/tables")
+    search = client.post(
+        "/api/search",
+        json={"query": "Rent 15000", "top_k": 5, "document_id": document_id},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["table_count"] == 1
+    assert response.json()["tables"][0]["page_number"] == 1
+    assert search.status_code == 200
+    assert any("15000" in result["text"] for result in search.json()["results"])
 
 
 def test_reject_oversized_file(

@@ -19,6 +19,7 @@ from pathlib import Path
 import numpy as np
 
 from app.config import get_settings
+from app.services.model_cache import ModelNotCachedError, resolve_local_snapshot as _resolve_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -52,31 +53,19 @@ class NLIScores:
         }
 
 
-def _repo_dirname(model_name: str) -> str:
-    return "models--" + model_name.replace("/", "--")
-
-
 def resolve_local_snapshot(model_name: str, cache_dir: Path) -> Path:
     """Find the cached snapshot directory for ``model_name`` without network access.
 
     Hugging Face stores repositories either directly under the cache root or
     under a ``hub/`` sub-directory (``HF_HOME`` layout); both are checked.
     """
-    base = _repo_dirname(model_name)
-    candidates: list[Path] = []
-    for root in (Path(cache_dir), Path(cache_dir) / "hub"):
-        snapshots = root / base / "snapshots"
-        if not snapshots.is_dir():
-            continue
-        for entry in snapshots.iterdir():
-            if entry.is_dir() and (entry / "config.json").is_file():
-                candidates.append(entry)
-    if not candidates:
+    try:
+        return _resolve_snapshot(model_name, cache_dir)
+    except ModelNotCachedError as exc:
         raise NLIError(
             f"NLI model '{model_name}' is not present in the local cache at "
             f"{cache_dir}. No download was attempted."
-        )
-    return max(candidates, key=lambda path: path.stat().st_mtime)
+        ) from exc
 
 
 class NLIService:
@@ -180,6 +169,37 @@ class NLIService:
                 from sentence_transformers import CrossEncoder
             except ImportError as exc:  # pragma: no cover - pinned dependency
                 raise NLIError("sentence-transformers is not installed.") from exc
+            except Exception as exc:
+                raise NLIError(
+                    f"Embedding runtime could not import model dependencies: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+
+            try:
+                import torch
+
+                try:
+                    torch.set_num_threads(1)
+                except RuntimeError as exc:
+                    logger.warning("Could not set PyTorch intra-op threads: %s", exc)
+
+                # set_num_interop_threads can only be called before PyTorch starts
+                # parallel work. Treat an already-started runtime as normal, rather
+                # than making model loading fail after work has begun.
+                if hasattr(torch, "set_num_interop_threads"):
+                    try:
+                        torch.set_num_interop_threads(1)
+                    except RuntimeError as exc:
+                        if "parallel work has started" not in str(exc).lower():
+                            raise
+                        logger.debug(
+                            "PyTorch inter-op threads already configured: %s", exc
+                        )
+            except Exception as exc:
+                raise NLIError(
+                    f"NLI runtime could not configure PyTorch: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
 
             snapshot = resolve_local_snapshot(self._model_name, self._cache_dir)
             try:

@@ -1,1 +1,1 @@
-# ProofLens AI Backend
+# VerifiDoc AI Backend

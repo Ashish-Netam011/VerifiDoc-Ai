@@ -1,4 +1,4 @@
-"""ProofLens AI FastAPI application entry point."""
+"""VerifiDoc AI FastAPI application entry point."""
 
 from __future__ import annotations
 
@@ -13,37 +13,37 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import get_settings
-from app.routers import documents, health, qa, questions, search
+from app.routers import amendments, conflicts, documents, health, qa, questions, search
 from app.routers.health import APP_VERSION
-from app.services.ollama_service import (
-    OllamaTimeoutError,
-    OllamaUnavailableError,
-    get_ollama_service,
-    shutdown_ollama_service,
+from app.services.llm_provider import (
+    LLMError,
+    LLMTimeoutError,
+    LLMUnavailableError,
 )
+from app.services.llm_service import shutdown_llm_service
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
 )
-logger = logging.getLogger("prooflens")
+logger = logging.getLogger("verificdoc")
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
-    logger.info("ProofLens backend %s starting", APP_VERSION)
-    logger.info("Ollama URL: %s", settings.ollama_url)
+    logger.info("VerifiDoc backend %s starting", APP_VERSION)
+    logger.info("LLM provider mode: %s", settings.llm_provider)
     logger.info("LLM model: %s", settings.llm_model)
     logger.info("Data directory: %s", settings.data_dir)
     logger.info("CORS origins: %s", ", ".join(settings.cors_origins))
     yield
-    await shutdown_ollama_service()
-    logger.info("ProofLens backend stopped")
+    await shutdown_llm_service()
+    logger.info("VerifiDoc backend stopped")
 
 
 app = FastAPI(
-    title="ProofLens AI API",
+    title="VerifiDoc AI API",
     version=APP_VERSION,
     summary="Backend for document-grounded claim verification.",
     description=(
@@ -60,7 +60,7 @@ app = FastAPI(
         {"name": "health", "description": "Service and LLM availability."},
         {
             "name": "llm-integration",
-            "description": "Temporary local-model smoke tests.",
+            "description": "Temporary configured-provider smoke test.",
         },
         {
             "name": "documents",
@@ -73,6 +73,14 @@ app = FastAPI(
         {
             "name": "qa",
             "description": "Evidence-grounded answers with source references.",
+        },
+        {
+            "name": "conflicts",
+            "description": "Conservative cross-document fact comparisons.",
+        },
+        {
+            "name": "amendments",
+            "description": "Explicit amendment chains and as-of-date resolution.",
         },
         {"name": "meta", "description": "API metadata."},
     ],
@@ -92,12 +100,14 @@ app.include_router(questions.router)
 app.include_router(documents.router)
 app.include_router(search.router)
 app.include_router(qa.router)
+app.include_router(conflicts.router)
+app.include_router(amendments.router)
 
 
 @app.get("/", tags=["meta"], summary="API root")
 async def root() -> dict[str, str]:
     return {
-        "name": "ProofLens AI API",
+        "name": "VerifiDoc AI API",
         "version": APP_VERSION,
         "docs": "/docs",
         "health": "/api/health",
@@ -121,9 +131,9 @@ async def validation_error_handler(
     )
 
 
-@app.exception_handler(OllamaUnavailableError)
-async def ollama_unavailable_handler(
-    _: Request, exc: OllamaUnavailableError
+@app.exception_handler(LLMUnavailableError)
+async def llm_unavailable_handler(
+    _: Request, exc: LLMUnavailableError
 ) -> JSONResponse:
     logger.warning("LLM unavailable: %s", exc)
     return JSONResponse(
@@ -136,13 +146,26 @@ async def ollama_unavailable_handler(
     )
 
 
-@app.exception_handler(OllamaTimeoutError)
-async def ollama_timeout_handler(
-    _: Request, exc: OllamaTimeoutError
+@app.exception_handler(LLMTimeoutError)
+async def llm_timeout_handler(
+    _: Request, exc: LLMTimeoutError
 ) -> JSONResponse:
     logger.warning("LLM timeout: %s", exc)
     return JSONResponse(
         status_code=504,
+        content={
+            "success": False,
+            "detail": str(exc),
+            "model": get_settings().llm_model,
+        },
+    )
+
+
+@app.exception_handler(LLMError)
+async def llm_error_handler(_: Request, exc: LLMError) -> JSONResponse:
+    logger.warning("LLM request failed: %s", exc)
+    return JSONResponse(
+        status_code=502,
         content={
             "success": False,
             "detail": str(exc),

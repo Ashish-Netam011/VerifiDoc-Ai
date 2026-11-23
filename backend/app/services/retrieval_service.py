@@ -22,18 +22,13 @@ from app.config import get_settings
 from app.services.bm25_service import BM25Index, BM25Result, get_bm25_index
 from app.services.document_store import DocumentStore
 from app.services.embedding_service import EmbeddingService, get_embedding_service
+from app.services.reranker_service import RerankerService, get_reranker_service
 from app.services.vector_store import SearchResult, VectorStore, get_vector_store
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_RRF_K = 60
 DEFAULT_TOP_K = 6
-# Each retriever contributes this many candidates before fusion, so a chunk
-# ranked poorly by one method can still win after fusion.
-CANDIDATE_MULTIPLIER = 4
-MIN_CANDIDATES = 32
-
-
 @dataclass(frozen=True)
 class RetrievalResult:
     """A fused search hit with the evidence needed for later phases."""
@@ -46,6 +41,7 @@ class RetrievalResult:
     semantic_score: float | None
     bm25_score: float | None
     rrf_score: float
+    reranker_score: float | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -58,6 +54,7 @@ class RetrievalResult:
             "semantic_score": self.semantic_score,
             "bm25_score": self.bm25_score,
             "rrf_score": self.rrf_score,
+            "reranker_score": self.reranker_score,
         }
 
 
@@ -94,6 +91,9 @@ class RetrievalService:
         bm25_index: BM25Index,
         rrf_k: int = DEFAULT_RRF_K,
         default_top_k: int = DEFAULT_TOP_K,
+        retrieval_candidate_k: int = 32,
+        rerank_candidate_k: int = 32,
+        reranker: RerankerService | None = None,
         document_store: DocumentStore | None = None,
     ) -> None:
         self.data_dir = Path(data_dir)
@@ -102,6 +102,9 @@ class RetrievalService:
         self._bm25 = bm25_index
         self._rrf_k = rrf_k
         self._default_top_k = default_top_k
+        self._retrieval_candidate_k = retrieval_candidate_k
+        self._rerank_candidate_k = rerank_candidate_k
+        self._reranker = reranker
         self._documents = document_store or DocumentStore(self.data_dir)
 
     @property
@@ -111,7 +114,7 @@ class RetrievalService:
     # -- helpers -------------------------------------------------------
 
     def _candidate_depth(self, limit: int, *, filtered: bool) -> int:
-        depth = max(limit * CANDIDATE_MULTIPLIER, MIN_CANDIDATES)
+        depth = max(limit, self._retrieval_candidate_k)
         if filtered:
             # With a document filter, over-fetch everything so the filter cannot
             # hide the only matching chunks.
@@ -186,14 +189,20 @@ class RetrievalService:
             chunk_id: rank
             for rank, chunk_id in enumerate(semantic_by_id, start=1)
         }
-        ordered = sorted(
+        ordered_candidates = sorted(
             fused,
             key=lambda chunk_id: (
                 -fused[chunk_id],
                 semantic_rank.get(chunk_id, len(fused) + 1),
                 chunk_id,
             ),
-        )[:limit]
+        )
+        rerank_limit = (
+            max(limit, self._rerank_candidate_k)
+            if self._reranker is not None
+            else limit
+        )
+        ordered = ordered_candidates[:rerank_limit]
 
         metadata: dict[str, dict[str, Any]] = {}
         for chunk_id in ordered:
@@ -241,7 +250,39 @@ class RetrievalService:
                     },
                 )
             )
-        return results
+        if self._reranker is None or not results:
+            return results[:limit]
+
+        reranker_scores = self._reranker.score(
+            query, [result.text for result in results]
+        )
+        if len(reranker_scores) != len(results):
+            raise ValueError(
+                "The reranker returned a different number of scores than candidates."
+            )
+        reranked = [
+            RetrievalResult(
+                chunk_id=result.chunk_id,
+                document_id=result.document_id,
+                filename=result.filename,
+                page_number=result.page_number,
+                text=result.text,
+                semantic_score=result.semantic_score,
+                bm25_score=result.bm25_score,
+                rrf_score=result.rrf_score,
+                reranker_score=float(score),
+                metadata=result.metadata,
+            )
+            for result, score in zip(results, reranker_scores)
+        ]
+        reranked.sort(
+            key=lambda result: (
+                -float(result.reranker_score or 0.0),
+                -result.rrf_score,
+                result.chunk_id,
+            )
+        )
+        return reranked[:limit]
 
 
 _service: RetrievalService | None = None
@@ -268,6 +309,9 @@ def get_retrieval_service() -> RetrievalService:
                     bm25_index=get_bm25_index(),
                     rrf_k=settings.rrf_k,
                     default_top_k=settings.top_k,
+                    retrieval_candidate_k=settings.retrieval_candidate_k,
+                    rerank_candidate_k=settings.rerank_candidate_k,
+                    reranker=get_reranker_service(),
                 )
     return _service
 

@@ -22,11 +22,13 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Iterable
 
+from app.services.document_store import DocumentStore
 from app.services.nli_service import NLIScores, NLIService, get_nli_service
 
 logger = logging.getLogger(__name__)
 
 NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
+MAX_COMBINED_NLI_BYTES = 480
 
 
 class VerificationStatus(str, Enum):
@@ -38,6 +40,7 @@ class VerificationStatus(str, Enum):
 
 class IntegrityFailure(str, Enum):
     UNKNOWN_CHUNK = "unknown_chunk"
+    DOCUMENT_NOT_FOUND = "document_not_found"
     DOCUMENT_MISMATCH = "document_mismatch"
     FILENAME_MISMATCH = "filename_mismatch"
     PAGE_MISMATCH = "page_mismatch"
@@ -100,6 +103,7 @@ class ClaimVerification:
     contradiction_score: float | None = None
     integrity_failures: list[str] = field(default_factory=list)
     evidence: list[EvidenceAssessment] = field(default_factory=list)
+    combined_evidence_chunk_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -122,6 +126,7 @@ class ClaimVerification:
             ),
             "integrity_failures": list(self.integrity_failures),
             "evidence": [item.to_dict() for item in self.evidence],
+            "combined_evidence_chunk_ids": list(self.combined_evidence_chunk_ids),
         }
 
 
@@ -170,7 +175,9 @@ def numeric_conflict(claim_text: str, premise_text: str) -> bool:
 
 
 def check_citation(
-    citation: CitationRecord, evidence_by_chunk: dict[str, EvidenceRecord]
+    citation: CitationRecord,
+    evidence_by_chunk: dict[str, EvidenceRecord],
+    document_records: dict[str, dict[str, object]] | None = None,
 ) -> IntegrityResult:
     """Validate a citation against the evidence actually supplied to the model."""
     record = evidence_by_chunk.get(citation.chunk_id)
@@ -178,12 +185,20 @@ def check_citation(
         return IntegrityResult(False, [IntegrityFailure.UNKNOWN_CHUNK.value])
 
     failures: list[str] = []
+    if citation.page_number < 1:
+        failures.append(IntegrityFailure.PAGE_MISMATCH.value)
     if citation.document_id != record.document_id:
         failures.append(IntegrityFailure.DOCUMENT_MISMATCH.value)
     if citation.filename != record.filename:
         failures.append(IntegrityFailure.FILENAME_MISMATCH.value)
     if int(citation.page_number) != int(record.page_number):
         failures.append(IntegrityFailure.PAGE_MISMATCH.value)
+    if document_records is not None:
+        document = document_records.get(citation.document_id)
+        if document is None:
+            failures.append(IntegrityFailure.DOCUMENT_NOT_FOUND.value)
+        elif citation.page_number > int(document.get("page_count", 0)):
+            failures.append(IntegrityFailure.PAGE_MISMATCH.value)
 
     quotation = (citation.quotation or "").strip()
     if not quotation:
@@ -191,6 +206,7 @@ def check_citation(
     elif quotation not in record.text:
         failures.append(IntegrityFailure.QUOTATION_NOT_IN_CHUNK.value)
 
+    failures = list(dict.fromkeys(failures))
     return IntegrityResult(not failures, failures)
 
 
@@ -218,10 +234,12 @@ class CitationVerifier:
         *,
         entailment_threshold: float = 0.60,
         contradiction_threshold: float = 0.60,
+        document_store: DocumentStore | None = None,
     ) -> None:
         self._nli = nli
         self._entailment_threshold = entailment_threshold
         self._contradiction_threshold = contradiction_threshold
+        self._document_store = document_store
 
     @property
     def entailment_threshold(self) -> float:
@@ -239,6 +257,16 @@ class CitationVerifier:
         """Verify several claims in one NLI batch."""
         evidence_by_chunk = {item.chunk_id: item for item in evidence}
         claim_list = [(text, list(citations)) for text, citations in claims]
+        document_records: dict[str, dict[str, object]] | None = None
+        if self._document_store is not None:
+            document_records = {}
+            for _, citations in claim_list:
+                for citation in citations:
+                    if citation.document_id in document_records:
+                        continue
+                    record = self._document_store.get_document(citation.document_id)
+                    if record is not None:
+                        document_records[citation.document_id] = record
 
         # 1. Integrity + numeric checks (no model needed).
         integrity: list[list[IntegrityResult]] = []
@@ -247,7 +275,7 @@ class CitationVerifier:
         for claim_index, (text, citations) in enumerate(claim_list):
             results: list[IntegrityResult] = []
             for citation_index, citation in enumerate(citations):
-                result = check_citation(citation, evidence_by_chunk)
+                result = check_citation(citation, evidence_by_chunk, document_records)
                 results.append(result)
                 record = evidence_by_chunk.get(citation.chunk_id)
                 if result.valid and record is not None:
@@ -269,6 +297,52 @@ class CitationVerifier:
             ):
                 scores[(claim_index, citation_index)] = result
 
+        # A claim may need multiple independently cited passages. Only attempt
+        # combined verification when all citations are intact, no cited passage
+        # already contradicts the claim, and the exact quotations fit a bounded
+        # NLI premise. This keeps the NLI model's own max length conservative.
+        combined_workers: dict[int, tuple[str, list[str], bool]] = {}
+        for claim_index, (text, citations) in enumerate(claim_list):
+            if len(citations) < 2 or any(
+                not result.valid for result in integrity[claim_index]
+            ):
+                continue
+            individual = [
+                scores[(claim_index, index)]
+                for index in range(len(citations))
+                if (claim_index, index) in scores
+            ]
+            if any(
+                result.contradiction >= self._contradiction_threshold
+                for result in individual
+            ) or any(
+                result.entailment >= self._entailment_threshold
+                and not conflicts.get((claim_index, index), False)
+                for index, result in enumerate(individual)
+            ):
+                continue
+            quote_texts = [citation.quotation.strip() for citation in citations]
+            premise = "\n".join(quote_texts)
+            pair_bytes = len(premise.encode("utf-8")) + len(text.encode("utf-8"))
+            if not premise or pair_bytes > MAX_COMBINED_NLI_BYTES:
+                continue
+            combined_workers[claim_index] = (
+                premise,
+                [citation.chunk_id for citation in citations],
+                numeric_conflict(text, premise),
+            )
+
+        combined_scores: dict[int, NLIScores] = {}
+        if combined_workers:
+            indices = list(combined_workers)
+            combined_values = self._nli.score_pairs(
+                [
+                    (combined_workers[index][0], _normalise(claim_list[index][0]))
+                    for index in indices
+                ]
+            )
+            combined_scores = dict(zip(indices, combined_values))
+
         # 3. Aggregate per claim.
         return [
             self._aggregate(
@@ -282,6 +356,8 @@ class CitationVerifier:
                 },
                 conflicts,
                 claim_index,
+                combined_scores.get(claim_index),
+                combined_workers.get(claim_index),
             )
             for claim_index, (text, citations) in enumerate(claim_list)
         ]
@@ -301,6 +377,8 @@ class CitationVerifier:
         scores: dict[int, NLIScores],
         conflicts: dict[tuple[int, int], bool],
         claim_index: int,
+        combined_score: NLIScores | None,
+        combined_data: tuple[str, list[str], bool] | None,
     ) -> ClaimVerification:
         if not citations:
             return ClaimVerification(
@@ -365,6 +443,32 @@ class CitationVerifier:
                 assessments=assessments,
             )
 
+        if combined_score is not None and combined_data is not None:
+            _, chunk_ids, has_numeric_conflict = combined_data
+            if combined_score.contradiction >= self._contradiction_threshold:
+                return ClaimVerification(
+                    VerificationStatus.CONTRADICTED,
+                    reason="combined_evidence_contradicts_claim",
+                    entailment_score=combined_score.entailment,
+                    neutral_score=combined_score.neutral,
+                    contradiction_score=combined_score.contradiction,
+                    evidence=assessments,
+                    combined_evidence_chunk_ids=chunk_ids,
+                )
+            if (
+                combined_score.entailment >= self._entailment_threshold
+                and not has_numeric_conflict
+            ):
+                return ClaimVerification(
+                    VerificationStatus.SUPPORTED,
+                    reason="combined_evidence_entails_claim",
+                    entailment_score=combined_score.entailment,
+                    neutral_score=combined_score.neutral,
+                    contradiction_score=combined_score.contradiction,
+                    evidence=assessments,
+                    combined_evidence_chunk_ids=chunk_ids,
+                )
+
         numeric = [item for item in assessments if item.numeric_conflict]
         if numeric:
             detail = "numeric_mismatch"
@@ -412,6 +516,7 @@ def get_citation_verifier() -> CitationVerifier:
                     get_nli_service(),
                     entailment_threshold=settings.nli_entailment_threshold,
                     contradiction_threshold=settings.nli_contradiction_threshold,
+                    document_store=DocumentStore(settings.data_dir),
                 )
     return _verifier
 

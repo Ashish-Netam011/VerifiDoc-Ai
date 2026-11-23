@@ -1,7 +1,7 @@
 """Abstention behaviour of ``POST /api/ask`` and of the QA service.
 
-Ollama and the NLI verifier are replaced by deterministic stubs; the real
-models are exercised outside the suite (see the Phase 3.3 report).
+The language model and NLI verifier are replaced by deterministic stubs; the
+real models are exercised outside the suite (see the Phase 3.3 report).
 """
 
 from __future__ import annotations
@@ -282,6 +282,36 @@ def test_wrong_amount_abstains_and_discloses_the_conflict() -> None:
     assert result.verification_status == "contradicted"
     assert result.conflicts and result.conflicts[0]["chunk_id"] == "c1"
     assert "contradict" in result.answer.lower()
+
+
+def test_unrelated_high_similarity_contradiction_is_not_reported_as_a_conflict() -> None:
+    service, ollama = _service(
+        [
+            _result(
+                "Monthly rent is INR 18,000 per month.",
+                semantic=0.93,
+            )
+        ],
+        _payload(
+            "The landlord's annual income is INR 216,000.",
+            [
+                {
+                    "text": "The landlord's annual income is INR 216,000.",
+                    "evidence_ids": ["E1"],
+                }
+            ],
+        ),
+        StatusVerifier([VerificationStatus.CONTRADICTED]),
+    )
+
+    result = _run(service, "What is the landlord's annual income?")
+
+    assert len(ollama.calls) == 1
+    assert result.decision == "abstain"
+    assert result.claims == []
+    assert result.conflicts == []
+    assert result.evidence_gap_report["reason"] == "no_relevant_evidence"
+    assert "No relevant evidence" in result.answer
 
 
 def test_conflicting_claims_abstain() -> None:

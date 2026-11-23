@@ -28,7 +28,7 @@ if str(BACKEND_DIR) not in sys.path:
 # Test data stays on the E: drive with the rest of the project artefacts.
 TEST_TMP_ROOT = BACKEND_DIR.parent / "data" / "tmp"
 TEST_TMP_ROOT.mkdir(parents=True, exist_ok=True)
-TEST_DATA_DIR = Path(tempfile.mkdtemp(prefix="prooflens_tests_", dir=TEST_TMP_ROOT))
+TEST_DATA_DIR = Path(tempfile.mkdtemp(prefix="verificdoc_tests_", dir=TEST_TMP_ROOT))
 os.environ["DATA_DIR"] = str(TEST_DATA_DIR)
 
 import pytest  # noqa: E402
@@ -91,6 +91,19 @@ class FakeEmbeddingService:
         return self.embed_query(text)
 
 
+class FakeRerankerService:
+    """Deterministic relevance ordering for API tests without model weights."""
+
+    model_name = "fake-reranker"
+
+    def score(self, query: str, passages: list[str]) -> list[float]:
+        terms = set(query.lower().split())
+        return [
+            float(len(terms.intersection(set(passage.lower().split()))))
+            for passage in passages
+        ]
+
+
 @pytest.fixture(scope="session")
 def data_dir() -> Path:
     return TEST_DATA_DIR
@@ -113,6 +126,10 @@ def fake_embeddings(monkeypatch: pytest.MonkeyPatch) -> FakeEmbeddingService:
         "app.services.retrieval_service.get_embedding_service", lambda: service
     )
     monkeypatch.setattr(
+        "app.services.retrieval_service.get_reranker_service",
+        lambda: FakeRerankerService(),
+    )
+    monkeypatch.setattr(
         "app.services.qa_service.get_citation_verifier",
         lambda: FakeCitationVerifier(),
     )
@@ -129,7 +146,10 @@ def fake_embeddings(monkeypatch: pytest.MonkeyPatch) -> FakeEmbeddingService:
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """Remove the throw-away data directory after a fully passing run."""
-    if exitstatus == 0 and os.environ.get("PROOFLENS_KEEP_TEST_DATA") != "1":
+    keep_test_data = os.environ.get("VERIFICDOC_KEEP_TEST_DATA")
+    if keep_test_data is None:
+        keep_test_data = os.environ.get("PROOFLENS_KEEP_TEST_DATA", "0")
+    if exitstatus == 0 and keep_test_data != "1":
         shutil.rmtree(TEST_DATA_DIR, ignore_errors=True)
 
 

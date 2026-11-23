@@ -76,6 +76,24 @@ class DocumentChunksResponse(BaseModel):
     chunks: list[ChunkModel]
 
 
+class ExtractedTableModel(BaseModel):
+    document_id: str
+    filename: str
+    page_number: int = Field(ge=1)
+    table_id: str
+    headers: list[str] = Field(default_factory=list)
+    rows: list[list[str | None]] = Field(default_factory=list)
+    status: str
+    review_reason: str | None = None
+
+
+class DocumentTablesResponse(BaseModel):
+    document_id: str
+    filename: str
+    table_count: int
+    tables: list[ExtractedTableModel]
+
+
 # -- helpers -----------------------------------------------------------------
 
 
@@ -243,6 +261,9 @@ async def upload_document(
 
         store = _store(data_dir)
         store.write_chunks(document_id, chunks)
+        store.write_tables(
+            document_id, [table.to_dict() for table in extracted.tables]
+        )
 
         embedding_service = get_embedding_service()
         try:
@@ -394,4 +415,27 @@ async def get_document_chunks(
         page_count=int(record.get("page_count", 0)),  # type: ignore[arg-type]
         chunk_count=len(chunks),
         chunks=[ChunkModel(**chunk) for chunk in chunks],  # type: ignore[arg-type]
+    )
+
+
+@router.get(
+    "/{document_id}/tables",
+    response_model=DocumentTablesResponse,
+    summary="Extracted PDF tables",
+    description=(
+        "Returns detected table rows with original page provenance. Tables "
+        "marked review_required or failed must not be treated as reliable data."
+    ),
+    responses={404: {"description": "Unknown document ID."}},
+)
+async def get_document_tables(
+    document_id: Annotated[str, PathParam(pattern=DOCUMENT_ID_PATTERN)],
+) -> DocumentTablesResponse:
+    store, record = _require_document(document_id)
+    tables = store.read_tables(document_id)
+    return DocumentTablesResponse(
+        document_id=document_id,
+        filename=str(record.get("filename", "")),
+        table_count=len(tables),
+        tables=[ExtractedTableModel.model_validate(table) for table in tables],
     )

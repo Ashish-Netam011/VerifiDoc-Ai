@@ -13,6 +13,7 @@ from app.config import get_settings
 from app.services.document_store import DocumentStore, DocumentStoreError
 from app.services.embedding_service import EmbeddingModelError
 from app.services.retrieval_service import get_retrieval_service
+from app.services.reranker_service import RerankerError
 from app.services.vector_store import VectorStoreError
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,10 @@ class SearchHit(BaseModel):
         default=None, description="BM25 score (null when only semantic matched)."
     )
     rrf_score: float = Field(description="Fused Reciprocal Rank Fusion score.")
+    reranker_score: float | None = Field(
+        default=None,
+        description="Local query-document relevance score after RRF reranking.",
+    )
 
 
 class SearchResponse(BaseModel):
@@ -80,14 +85,14 @@ class SearchResponse(BaseModel):
     description=(
         "Runs semantic retrieval over the vector index and BM25 over the stored "
         "chunks, then fuses both rankings with Reciprocal Rank Fusion "
-        "(1 / (k + rank), k from RRF_K). Raw cosine and BM25 scores are never "
-        "added together. Returns an empty result list when the corpus holds no "
-        "evidence."
+        "(1 / (k + rank), k from RRF_K), then reranks a bounded candidate pool "
+        "with the configured local relevance cross-encoder. Raw cosine, BM25, "
+        "RRF, and relevance scores remain separate."
     ),
     responses={
         422: {"description": "Blank query, bad top_k or malformed document_id."},
         404: {"description": "The requested document_id does not exist."},
-        503: {"description": "The embedding model is unavailable."},
+        503: {"description": "An embedding or relevance model is unavailable."},
     },
 )
 async def search_documents(payload: SearchRequest) -> SearchResponse:
@@ -113,6 +118,12 @@ async def search_documents(payload: SearchRequest) -> SearchResponse:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Semantic search is unavailable. {exc}",
+        ) from exc
+    except RerankerError as exc:
+        logger.error("Search reranker unavailable: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Relevance reranking is unavailable. {exc}",
         ) from exc
     except VectorStoreError as exc:
         logger.error("Vector search failed: %s", exc)
@@ -149,6 +160,11 @@ async def search_documents(payload: SearchRequest) -> SearchResponse:
                 else None
             ),
             rrf_score=round(result.rrf_score, 6),
+            reranker_score=(
+                round(result.reranker_score, 6)
+                if result.reranker_score is not None
+                else None
+            ),
         )
         for result in results
     ]

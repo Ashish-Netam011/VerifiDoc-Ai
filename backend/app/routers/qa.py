@@ -11,12 +11,13 @@ from pydantic import BaseModel, Field, field_validator
 from app.config import get_settings
 from app.services.document_store import DocumentStore, DocumentStoreError
 from app.services.embedding_service import EmbeddingModelError
-from app.services.ollama_service import (
-    OllamaError,
-    OllamaTimeoutError,
-    OllamaUnavailableError,
+from app.services.llm_provider import (
+    LLMError,
+    LLMTimeoutError,
+    LLMUnavailableError,
 )
 from app.services.qa_service import QAResponseError, get_qa_service
+from app.services.reranker_service import RerankerError
 from app.services.vector_store import VectorStoreError
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,7 @@ class AskVerification(BaseModel):
     contradiction_score: float | None = None
     integrity_failures: list[str] = Field(default_factory=list)
     evidence: list[AskEvidenceAssessment] = Field(default_factory=list)
+    combined_evidence_chunk_ids: list[str] = Field(default_factory=list)
 
 
 class AskClaim(BaseModel):
@@ -148,6 +150,33 @@ class AskEvidenceGapReport(BaseModel):
     )
 
 
+class AskSentenceEvidence(BaseModel):
+    chunk_id: str
+    document_id: str
+    filename: str
+    page_number: int
+    quotation: str
+
+
+class AskFaithfulnessSentence(BaseModel):
+    sentence_index: int
+    sentence: str
+    supported: bool
+    claim_indices: list[int] = Field(default_factory=list)
+    evidence: list[AskSentenceEvidence] = Field(default_factory=list)
+
+
+class AskFaithfulness(BaseModel):
+    percentage: float | None = None
+    total_sentence_count: int = 0
+    supported_sentence_count: int = 0
+    unsupported_sentence_count: int = 0
+    sentences: list[AskFaithfulnessSentence] = Field(default_factory=list)
+    metric_note: str = (
+        "This measures sentence-to-verified-evidence linkage, not legal correctness."
+    )
+
+
 class AskRetrieval(BaseModel):
     result_count: int = Field(description="Retrieved evidence items used for this answer.")
 
@@ -192,6 +221,13 @@ class AskResponse(BaseModel):
         default=None,
         description="Structured explanation of the decision and its evidence.",
     )
+    faithfulness: AskFaithfulness = Field(
+        default_factory=AskFaithfulness,
+        description=(
+            "Sentence-level linkage to claims that passed citation integrity and NLI "
+            "verification; this is not a legal correctness score."
+        ),
+    )
 
 
 @router.post(
@@ -199,8 +235,11 @@ class AskResponse(BaseModel):
     response_model=AskResponse,
     summary="Answer a question from retrieved document evidence",
     description=(
-        "Retrieves evidence with the hybrid engine, asks the local Qwen model to "
-        "answer using only that evidence, validates the model's JSON strictly, "
+        "Retrieves evidence with the hybrid engine, sends selected evidence to "
+        "the configured OpenRouter model, "
+        "reranks a bounded RRF candidate set with a separate local relevance "
+        "cross-encoder, answers using only that evidence, validates the model's "
+        "JSON strictly, "
         "resolves the cited evidence labels to backend-owned source records "
         "(document, filename, page, exact excerpt), verifies each claim with the "
         "cached NLI model and applies the deterministic evidence-sufficiency "
@@ -212,7 +251,11 @@ class AskResponse(BaseModel):
         404: {"description": "The requested document_id does not exist."},
         422: {"description": "Blank question, bad top_k or malformed document_id."},
         502: {"description": "The language model returned an unusable response."},
-        503: {"description": "Ollama or the embedding model is unavailable."},
+        503: {
+            "description": (
+                "OpenRouter, embedding, or relevance-reranker model is unavailable."
+            )
+        },
         504: {"description": "The language model timed out."},
     },
 )
@@ -234,19 +277,19 @@ async def ask(payload: AskRequest) -> AskResponse:
             top_k=payload.top_k,
             document_id=payload.document_id,
         )
-    except OllamaUnavailableError as exc:
+    except LLMUnavailableError as exc:
         logger.warning("QA model unavailable: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(exc),
         ) from exc
-    except OllamaTimeoutError as exc:
+    except LLMTimeoutError as exc:
         logger.warning("QA model timeout: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail=str(exc),
         ) from exc
-    except OllamaError as exc:
+    except LLMError as exc:
         logger.error("QA model error: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -263,6 +306,12 @@ async def ask(payload: AskRequest) -> AskResponse:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Retrieval is unavailable. {exc}",
+        ) from exc
+    except RerankerError as exc:
+        logger.error("QA reranker unavailable: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Relevance reranking is unavailable. {exc}",
         ) from exc
     except (VectorStoreError, DocumentStoreError) as exc:
         logger.error("QA retrieval failed: %s", exc)
@@ -313,4 +362,5 @@ async def ask(payload: AskRequest) -> AskResponse:
             if result.evidence_gap_report is not None
             else None
         ),
+        faithfulness=AskFaithfulness.model_validate(result.faithfulness),
     )

@@ -13,17 +13,23 @@ import { searchDocuments } from '../src/api/search.js'
 import { API_BASE_URL, DEFAULT_TIMEOUTS, apiUrl, uploadFile } from '../src/api/client.js'
 import { ApiError } from '../src/api/errors.js'
 import { getHealth, parseHealth } from '../src/api/health.js'
-import { listDocuments, uploadDocument } from '../src/api/documents.js'
+import {
+  getDocumentTables,
+  listDocuments,
+  uploadDocument,
+} from '../src/api/documents.js'
 import { askQuestion } from '../src/api/questions.js'
+import { analyzeConflicts } from '../src/api/conflicts.js'
+import { getAmendments } from '../src/api/amendments.js'
 
 const HEALTH_PAYLOAD = {
   status: 'ok',
   backend: { status: 'ok', version: '0.2.0', uptime_s: 1262.328 },
   llm: {
     available: true,
-    model: 'qwen2.5:3b-instruct',
+    model: 'anthropic/claude-sonnet-5',
     model_present: true,
-    detail: 'Ollama is running and the configured model is installed.',
+    detail: 'OpenRouter credentials and configured model are available.',
   },
 }
 
@@ -84,11 +90,11 @@ test('parseHealth reports every signal from the payload', () => {
   const health = parseHealth(HEALTH_PAYLOAD)
   assert.equal(health.serviceStatus, 'ok')
   assert.equal(health.backendAvailable, true)
-  assert.equal(health.ollamaAvailable, true)
+  assert.equal(health.providerAvailable, true)
   assert.equal(health.modelPresent, true)
   assert.equal(health.llmUsable, true)
   assert.equal(health.modelState, 'ready')
-  assert.equal(health.model, 'qwen2.5:3b-instruct')
+  assert.equal(health.model, 'anthropic/claude-sonnet-5')
   assert.equal(health.backendVersion, '0.2.0')
 })
 
@@ -98,26 +104,26 @@ test('a 200 response with a degraded LLM is not treated as healthy', () => {
     status: 'degraded',
     llm: {
       available: false,
-      model: 'qwen2.5:3b-instruct',
+      model: 'anthropic/claude-sonnet-5',
       model_present: false,
       detail: 'Model is not installed.',
     },
   })
   assert.equal(health.serviceStatus, 'degraded')
   assert.equal(health.backendAvailable, true)
-  assert.equal(health.ollamaAvailable, false)
+  assert.equal(health.providerAvailable, false)
   assert.equal(health.modelPresent, false)
   assert.equal(health.llmUsable, false)
-  assert.equal(health.modelState, 'ollama_unavailable')
+  assert.equal(health.modelState, 'provider_unavailable')
 })
 
-test('a present model without Ollama availability is reported as model_missing', () => {
+test('a configured model without provider availability is not ready', () => {
   const health = parseHealth({
     ...HEALTH_PAYLOAD,
     llm: { ...HEALTH_PAYLOAD.llm, available: false, model_present: true },
   })
   assert.equal(health.llmUsable, false)
-  assert.equal(health.modelState, 'model_missing')
+  assert.equal(health.modelState, 'provider_unavailable')
 })
 
 test('an unreadable health payload becomes a parse error', () => {
@@ -526,4 +532,54 @@ test('uploadFile rejects immediately when the signal is already aborted', async 
     uploadFile('/api/documents/upload', new FormData(), { signal: controller.signal }),
     (error) => error.kind === 'aborted',
   )
+})
+
+test('getDocumentTables parses the additive table endpoint response', async () => {
+  const expected = {
+    document_id: DOCUMENT.document_id,
+    filename: DOCUMENT.filename,
+    table_count: 0,
+    tables: [],
+  }
+  const fetchStub = stubFetch(() => jsonResponse(expected))
+  try {
+    const result = await getDocumentTables(DOCUMENT.document_id)
+    assert.deepEqual(result, expected)
+    assert.equal(
+      fetchStub.calls[0].url,
+      `/api/documents/${DOCUMENT.document_id}/tables`,
+    )
+  } finally {
+    fetchStub.restore()
+  }
+})
+
+test('analyzeConflicts sends the documented query and top_k fields', async () => {
+  const fetchStub = stubFetch(() =>
+    jsonResponse({ query: 'rent', result_count: 1, facts: [], comparisons: [] }),
+  )
+  try {
+    await analyzeConflicts({ query: 'rent', topK: 12 })
+    assert.equal(fetchStub.calls[0].url, '/api/conflicts')
+    assert.equal(fetchStub.calls[0].init.method, 'POST')
+    assert.deepEqual(JSON.parse(fetchStub.calls[0].init.body), {
+      query: 'rent',
+      top_k: 12,
+    })
+  } finally {
+    fetchStub.restore()
+  }
+})
+
+test('getAmendments requests an as-of date without changing the existing API', async () => {
+  const fetchStub = stubFetch(() =>
+    jsonResponse({ as_of_date: '2025-01-01', amendments: [], resolutions: [] }),
+  )
+  try {
+    await getAmendments({ asOfDate: '2025-01-01' })
+    assert.equal(fetchStub.calls[0].url, '/api/amendments?as_of_date=2025-01-01')
+    assert.equal(fetchStub.calls[0].init.method, 'GET')
+  } finally {
+    fetchStub.restore()
+  }
 })

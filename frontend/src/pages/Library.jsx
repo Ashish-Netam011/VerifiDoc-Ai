@@ -49,8 +49,8 @@ export function Library() {
         ) : null}
       </div>
 
-      <div className="mt-6 grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,26rem)]">
-        <div className="space-y-6">
+      <div className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,26rem)]">
+        <div className="min-w-0 space-y-6">
           <UploadPanel uploads={uploads} />
           <DocumentLibrary
             library={library}
@@ -58,7 +58,7 @@ export function Library() {
             onSelect={setSelectedId}
           />
         </div>
-        <div>
+        <div className="min-w-0">
           <DocumentDetails
             documentId={selectedId}
             onClose={selectedId ? () => setSelectedId(null) : undefined}

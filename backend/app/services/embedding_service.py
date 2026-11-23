@@ -94,6 +94,37 @@ class EmbeddingService:
                 raise EmbeddingModelError(
                     "sentence-transformers is not installed in this environment."
                 ) from exc
+            except Exception as exc:
+                raise EmbeddingModelError(
+                    f"Embedding runtime could not import model dependencies: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+
+            try:
+                import torch
+
+                try:
+                    torch.set_num_threads(1)
+                except RuntimeError as exc:
+                    logger.warning("Could not set PyTorch intra-op threads: %s", exc)
+
+                # set_num_interop_threads can only be called before PyTorch starts
+                # parallel work. Treat an already-started runtime as normal, rather
+                # than making model loading fail after work has begun.
+                if hasattr(torch, "set_num_interop_threads"):
+                    try:
+                        torch.set_num_interop_threads(1)
+                    except RuntimeError as exc:
+                        if "parallel work has started" not in str(exc).lower():
+                            raise
+                        logger.debug(
+                            "PyTorch inter-op threads already configured: %s", exc
+                        )
+            except Exception as exc:
+                raise EmbeddingModelError(
+                    f"Embedding runtime could not configure PyTorch: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
 
             try:
                 model = SentenceTransformer(

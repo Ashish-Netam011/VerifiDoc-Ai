@@ -98,6 +98,7 @@ export function useAsk({ auto = true } = {}) {
         missing_information: payload.missing_information ?? [],
         conflicts: payload.conflicts ?? [],
         evidence_gap_report: payload.evidence_gap_report ?? null,
+        faithfulness: payload.faithfulness ?? null,
         retrievedAt: Date.now(),
       }
 

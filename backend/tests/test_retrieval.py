@@ -81,6 +81,16 @@ class StubBM25:
         return hits[:top_k]
 
 
+class StubReranker:
+    def __init__(self, scores: dict[str, float]) -> None:
+        self.scores = scores
+        self.calls: list[tuple[str, list[str]]] = []
+
+    def score(self, query: str, passages: list[str]) -> list[float]:
+        self.calls.append((query, list(passages)))
+        return [self.scores[text] for text in passages]
+
+
 def _seed_corpus(tmp_path: Path) -> DocumentStore:
     store = DocumentStore(tmp_path)
     for document_id, filename, chunks in (
@@ -192,6 +202,37 @@ def test_duplicate_chunks_appear_once_with_both_scores(tmp_path: Path) -> None:
     assert results[0].semantic_score is not None
     assert results[0].bm25_score is not None
     assert [item.chunk_id for item in results].count("c1") == 1
+
+
+def test_reranker_orders_bounded_rrf_candidates_and_keeps_scores(
+    tmp_path: Path,
+) -> None:
+    store = _seed_corpus(tmp_path)
+    reranker = StubReranker(
+        {
+            "The Tenant shall pay the monthly rent on the first day.": 0.1,
+            "3.2 Amendments require a written instrument.": 0.95,
+        }
+    )
+    service = RetrievalService(
+        tmp_path,
+        embedding_service=StubEmbedding(),
+        vector_store=StubVectorStore(
+            [_search_result("c1", 0.95), _search_result("c2", 0.80)]
+        ),
+        bm25_index=StubBM25([_bm25_result("c1", 4.0), _bm25_result("c2", 2.0)]),
+        document_store=store,
+        reranker=reranker,
+        retrieval_candidate_k=10,
+        rerank_candidate_k=2,
+    )
+
+    results = service.search("amendments", top_k=1)
+
+    assert [item.chunk_id for item in results] == ["c2"]
+    assert results[0].reranker_score == pytest.approx(0.95)
+    assert len(reranker.calls) == 1
+    assert len(reranker.calls[0][1]) == 2
 
 
 def test_keyword_only_results_keep_semantic_score_null(tmp_path: Path) -> None:

@@ -24,6 +24,7 @@ DocumentStatus = Literal["processed", "failed"]
 
 INDEX_FILENAME = "documents.json"
 CHUNKS_FILENAME = "chunks.json"
+TABLES_FILENAME = "tables.json"
 
 
 class DocumentStoreError(RuntimeError):
@@ -161,3 +162,27 @@ class DocumentStore:
         if not isinstance(chunks, list):
             raise DocumentStoreError("The chunk file has an unexpected shape.")
         return [chunk for chunk in chunks if isinstance(chunk, dict)]
+
+    def tables_path(self, document_id: str) -> Path:
+        return document_dir(self.data_dir, document_id) / TABLES_FILENAME
+
+    def write_tables(
+        self, document_id: str, tables: list[dict[str, Any]]
+    ) -> None:
+        _atomic_write_json(
+            self.tables_path(document_id),
+            {"document_id": document_id, "table_count": len(tables), "tables": tables},
+        )
+
+    def read_tables(self, document_id: str) -> list[dict[str, Any]]:
+        path = self.tables_path(document_id)
+        if not path.exists():
+            return []
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise DocumentStoreError("The table extraction file is unreadable.") from exc
+        tables = raw.get("tables") if isinstance(raw, dict) else None
+        if not isinstance(tables, list):
+            raise DocumentStoreError("The table extraction file has an unexpected shape.")
+        return [table for table in tables if isinstance(table, dict)]

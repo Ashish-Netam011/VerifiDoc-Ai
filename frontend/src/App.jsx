@@ -5,6 +5,8 @@ import { Library } from './pages/Library'
 import { Chat } from './pages/Chat'
 import { AskPage } from './pages/AskPage'
 import { SearchPage } from './pages/SearchPage'
+import { Contradictions } from './pages/Contradictions'
+import { Amendments } from './pages/Amendments'
 
 function App() {
   return (
@@ -15,6 +17,8 @@ function App() {
           <Route path="/chat" element={<Chat />} />
           <Route path="/ask" element={<AskPage />} />
           <Route path="/search" element={<SearchPage />} />
+          <Route path="/conflicts" element={<Contradictions />} />
+          <Route path="/amendments" element={<Amendments />} />
         </Route>
       </Routes>
     </Router>

@@ -25,7 +25,7 @@ export function EvidenceGapReport({ evidence_gap_report }) {
   const title = {
     answer: 'Evidence report',
     partial_answer: 'Evidence gaps',
-    abstain: 'Why ProofLens abstained',
+    abstain: 'Why VerifiDoc abstained',
   }[status] || 'Evidence report'
 
   return (
@@ -163,7 +163,7 @@ export function EvidenceGapReport({ evidence_gap_report }) {
 
         {coverage?.status === 'uncertain' && (
           <p className="text-sm text-slate-500">
-            ProofLens could not reliably identify all requested facts.
+            VerifiDoc could not reliably identify all requested facts.
           </p>
         )}
 

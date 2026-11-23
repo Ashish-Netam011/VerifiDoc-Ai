@@ -8,8 +8,7 @@ from typing import Literal
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from app.config import get_settings
-from app.services.ollama_service import get_ollama_service
+from app.services.llm_service import get_llm_service
 
 APP_VERSION = "0.2.0"
 
@@ -26,10 +25,10 @@ class BackendHealth(BaseModel):
 
 
 class LLMHealth(BaseModel):
-    available: bool = Field(description="Ollama answered a probe request.")
+    available: bool = Field(description="A configured LLM provider is usable.")
     model: str = Field(description="Model the backend is configured to use.")
     model_present: bool = Field(
-        description="The configured model is installed in Ollama."
+        description="The configured model is available from its provider."
     )
     detail: str = Field(description="Human-readable explanation of the state.")
 
@@ -47,13 +46,11 @@ class HealthResponse(BaseModel):
     response_model=HealthResponse,
     summary="Backend and LLM health",
     description=(
-        "Reports API liveness separately from LLM availability so a missing "
-        "Ollama instance never looks like a dead backend."
+        "Reports API liveness separately from configured LLM provider availability."
     ),
 )
 async def health() -> HealthResponse:
-    settings = get_settings()
-    status = await get_ollama_service().check_availability()
+    status = await get_llm_service().check_availability()
 
     llm = LLMHealth(
         available=status.available and status.model_present,

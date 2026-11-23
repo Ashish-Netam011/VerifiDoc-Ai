@@ -100,6 +100,18 @@ def test_valid_citation_passes_integrity() -> None:
     assert check_citation(citation(), by_chunk).valid is True
 
 
+def test_citation_checks_document_and_page_bounds_when_catalogue_is_available() -> None:
+    by_chunk = {item.chunk_id: item for item in EVIDENCE}
+    documents = {"d1": {"page_count": 1}}
+    assert check_citation(citation(), by_chunk, documents).valid is True
+    assert check_citation(
+        citation(page_number=2), by_chunk, documents
+    ).failures == [IntegrityFailure.PAGE_MISMATCH.value]
+    assert check_citation(
+        citation(), by_chunk, {}
+    ).failures == [IntegrityFailure.DOCUMENT_NOT_FOUND.value]
+
+
 def test_unknown_chunk_is_invalid() -> None:
     by_chunk = {item.chunk_id: item for item in EVIDENCE}
     result = check_citation(citation(chunk_id="nope"), by_chunk)
@@ -296,6 +308,38 @@ def test_claim_spanning_two_chunks_is_not_supported() -> None:
         EVIDENCE,
     )
     assert verdict.status is VerificationStatus.INSUFFICIENT
+
+
+def test_claim_supported_by_multiple_exact_citations() -> None:
+    class CombiningNLI:
+        def score_pairs(self, pairs):
+            scores = []
+            for premise, _ in pairs:
+                if "monthly rent" in premise and "registered post" in premise:
+                    scores.append(ENTAILS)
+                else:
+                    scores.append(NEUTRAL)
+            return scores
+
+    citations = [
+        citation(),
+        citation(
+            chunk_id="c2",
+            document_id="d2",
+            filename="notices.pdf",
+            page_number=2,
+            quotation=OTHER_TEXT,
+        ),
+    ]
+    claim = (
+        "The monthly rent is INR 15,000 and notices must be delivered by "
+        "registered post to Schedule 2."
+    )
+    verdict = verifier(CombiningNLI()).verify_claim(claim, citations, EVIDENCE)
+
+    assert verdict.status is VerificationStatus.SUPPORTED
+    assert verdict.reason == "combined_evidence_entails_claim"
+    assert verdict.combined_evidence_chunk_ids == ["c1", "c2"]
 
 
 def test_contradiction_beats_entailment() -> None:

@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
-import { getDocument, getDocumentChunks } from '@/api/documents'
+import {
+  getDocument,
+  getDocumentChunks,
+  getDocumentTables,
+} from '@/api/documents'
 import { isAbortError } from '@/api/errors'
 
 /**
@@ -12,31 +16,57 @@ export function useDocumentDetails(documentId) {
     phase: 'idle',
     document: null,
     chunkResponse: null,
+    tableResponse: null,
     error: null,
   })
   const [attempt, setAttempt] = useState(0)
 
   useEffect(() => {
     if (!documentId) {
-      setState({ phase: 'idle', document: null, chunkResponse: null, error: null })
+      setState({
+        phase: 'idle',
+        document: null,
+        chunkResponse: null,
+        tableResponse: null,
+        error: null,
+      })
       return undefined
     }
 
     const controller = new AbortController()
     let active = true
-    setState({ phase: 'loading', document: null, chunkResponse: null, error: null })
+    setState({
+      phase: 'loading',
+      document: null,
+      chunkResponse: null,
+      tableResponse: null,
+      error: null,
+    })
 
     Promise.all([
       getDocument(documentId, { signal: controller.signal }),
       getDocumentChunks(documentId, { signal: controller.signal }),
+      getDocumentTables(documentId, { signal: controller.signal }),
     ])
-      .then(([document, chunkResponse]) => {
+      .then(([document, chunkResponse, tableResponse]) => {
         if (!active) return
-        setState({ phase: 'ready', document, chunkResponse, error: null })
+        setState({
+          phase: 'ready',
+          document,
+          chunkResponse,
+          tableResponse,
+          error: null,
+        })
       })
       .catch((error) => {
         if (!active || isAbortError(error)) return
-        setState({ phase: 'error', document: null, chunkResponse: null, error })
+        setState({
+          phase: 'error',
+          document: null,
+          chunkResponse: null,
+          tableResponse: null,
+          error,
+        })
       })
 
     return () => {

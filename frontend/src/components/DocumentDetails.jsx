@@ -29,13 +29,25 @@ function groupChunksByPage(chunkResponse) {
   return [...pages.entries()].sort((a, b) => a[0] - b[0])
 }
 
+function tableBodyRows(table) {
+  const rows = table.rows ?? []
+  const firstRow = rows[0]
+  const includesHeader =
+    table.headers?.length > 0 &&
+    firstRow?.length === table.headers.length &&
+    table.headers.every(
+      (header, index) => (firstRow[index] ?? '').trim() === header.trim(),
+    )
+  return includesHeader ? rows.slice(1) : rows
+}
+
 /**
  * Metadata plus the extracted text the backend actually stores, grouped by
  * page. There is no page image or page-text endpoint, so chunks are the only
  * document view rendered here.
  */
 export function DocumentDetails({ documentId, onClose }) {
-  const { phase, document, chunkResponse, error, refresh } =
+  const { phase, document, chunkResponse, tableResponse, error, refresh } =
     useDocumentDetails(documentId)
   const pages = useMemo(() => groupChunksByPage(chunkResponse), [chunkResponse])
 
@@ -147,6 +159,79 @@ export function DocumentDetails({ documentId, onClose }) {
             </dl>
 
             <div className="border-t border-slate-100 pt-4">
+              <div className="mb-4">
+                <h3 className="text-sm font-semibold text-slate-900">
+                  Detected tables
+                </h3>
+                {(tableResponse?.tables ?? []).length === 0 ? (
+                  <p className="mt-2 text-xs text-slate-500">
+                    No tables were detected in this document.
+                  </p>
+                ) : (
+                  <div className="mt-3 space-y-3">
+                    {tableResponse.tables.map((table) => (
+                      <section
+                        key={table.table_id}
+                        className="overflow-hidden rounded-lg border border-slate-200"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-50 px-3 py-2">
+                          <p className="text-xs font-semibold text-slate-800">
+                            {table.table_id} · Page {table.page_number}
+                          </p>
+                          <span className={`text-xs font-medium ${
+                            table.status === 'extracted'
+                              ? 'text-emerald-700'
+                              : 'text-amber-700'
+                          }`}>
+                            {table.status === 'extracted'
+                              ? 'Extracted'
+                              : 'Review required'}
+                          </span>
+                        </div>
+                        {table.review_reason ? (
+                          <p className="px-3 pt-2 text-xs text-amber-800">
+                            {table.review_reason}
+                          </p>
+                        ) : null}
+                        <div className="overflow-x-auto p-3">
+                          <table className="min-w-full border-collapse text-left text-xs">
+                            {table.headers?.length ? (
+                              <thead>
+                                <tr>
+                                  {table.headers.map((header, index) => (
+                                    <th
+                                      key={`${table.table_id}-h${index}`}
+                                      className="border border-slate-200 bg-slate-50 px-2 py-1.5 font-semibold text-slate-700"
+                                    >
+                                      {header || '—'}
+                                    </th>
+                                  ))}
+                                </tr>
+                              </thead>
+                            ) : null}
+                            <tbody>
+                              {tableBodyRows(table).map((row, rowIndex) => (
+                                <tr key={`${table.table_id}-r${rowIndex}`}>
+                                  {row.map((cell, cellIndex) => (
+                                    <td
+                                      key={`${table.table_id}-${rowIndex}-${cellIndex}`}
+                                      className="border border-slate-200 px-2 py-1.5 text-slate-700"
+                                    >
+                                      {cell ?? '—'}
+                                    </td>
+                                  ))}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </section>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="border-t border-slate-100 pt-4">
               <div className="flex items-baseline justify-between gap-2">
                 <h3 className="text-sm font-semibold text-slate-900">
                   Extracted text
@@ -191,6 +276,7 @@ export function DocumentDetails({ documentId, onClose }) {
                   ))}
                 </div>
               )}
+            </div>
             </div>
           </div>
         )}

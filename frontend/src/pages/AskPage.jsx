@@ -1,7 +1,6 @@
 import { useCallback, useState } from 'react'
 
 import { Container } from '@/components/ui'
-import { HealthBadge } from '@/components/HealthBadge'
 import { DocumentSelector } from '@/components/DocumentSelector'
 import { QuestionInput } from '@/components/QuestionInput'
 import { AnswerPanel } from '@/components/AnswerPanel'
@@ -32,17 +31,24 @@ export function AskPage() {
       <div className="mb-5 flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-slate-900">
-            ProofLens AI
+            VerifiDoc AI
           </h1>
           <p className="mt-1 text-sm text-slate-500">
             Ask questions. Inspect evidence. Trust only what is proved.
           </p>
         </div>
-
-        <HealthBadge />
       </div>
 
       <div className="mx-auto max-w-3xl space-y-5">
+        <p
+          role="note"
+          className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"
+        >
+          Questions, retrieved excerpts, and their filename/page/chunk labels
+          are sent to OpenRouter for Gemini 3.7 Flash inference. Only ask about
+          documents you are authorized to share with this service.
+        </p>
+
         <DocumentSelector
           onSelect={setSelectedDocId}
         />

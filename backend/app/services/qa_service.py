@@ -1,7 +1,8 @@
 """Evidence-grounded question answering.
 
-Pipeline: question -> hybrid retrieval -> bounded evidence context -> Qwen via
-Ollama (JSON mode) -> strict validation -> backend-owned citation mapping.
+Pipeline: question -> hybrid retrieval -> bounded evidence context ->
+the configured OpenRouter model in JSON mode -> strict validation ->
+backend-owned citation mapping.
 
 The LLM only proposes an answer and references evidence labels. Everything the
 client sees about *sources* (document ID, filename, page number, quotation) is
@@ -41,9 +42,11 @@ from app.services.evidence_sufficiency import (
     PrecheckResult,
     get_evidence_sufficiency_engine,
 )
+from app.services.faithfulness_service import calculate_faithfulness
 from app.services.nli_service import NLIError
 from app.services.retrieval_service import RetrievalResult, RetrievalService, get_retrieval_service
-from app.services.ollama_service import OllamaService, get_ollama_service
+from app.services.llm_provider import BaseLLMProvider
+from app.services.llm_service import get_llm_service
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +54,7 @@ MAX_QUOTE_CHARS = 240
 EVIDENCE_LABEL_RE = re.compile(r"^e(\d+)$", re.IGNORECASE)
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.;:])\s+|\n+")
 
-SYSTEM_PROMPT = """You are ProofLens, a question-answering assistant that answers ONLY from \
+SYSTEM_PROMPT = """You are VerifiDoc, a question-answering assistant that answers ONLY from \
 document evidence supplied by the application.
 
 MANDATORY RULES:
@@ -150,6 +153,7 @@ class QAResult:
     missing_information: list[str] = field(default_factory=list)
     conflicts: list[dict[str, Any]] = field(default_factory=list)
     evidence_gap_report: dict[str, Any] | None = None
+    faithfulness: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -163,6 +167,7 @@ class QAResult:
             "missing_information": list(self.missing_information),
             "conflicts": list(self.conflicts),
             "evidence_gap_report": self.evidence_gap_report,
+            "faithfulness": self.faithfulness,
         }
 
 
@@ -185,13 +190,23 @@ def _truncate(text: str, budget: int) -> tuple[str, bool]:
 
 
 def build_evidence(
-    results: list[RetrievalResult], max_context_chars: int
+    results: list[RetrievalResult],
+    max_context_chars: int,
+    *,
+    question: str = "",
+    max_total_tokens: int | None = None,
+    output_reserve: int = 0,
 ) -> tuple[list[EvidenceItem], list[str]]:
-    """Label and bound retrieved chunks; returns items plus truncation notes."""
+    """Build bounded, deduplicated evidence and retain backend retrieval scores.
+
+    The total-context guard uses UTF-8 bytes as a conservative upper bound for
+    prompt tokens. It includes the system prompt and reserves output tokens.
+    """
     items: list[EvidenceItem] = []
     limitations: list[str] = []
     remaining = max_context_chars
-    for index, result in enumerate(results, start=1):
+    seen_text: set[tuple[str, str]] = set()
+    for result in results:
         if remaining <= 0:
             limitations.append(
                 "Additional retrieved evidence was left out to stay within the "
@@ -201,11 +216,56 @@ def build_evidence(
         text, truncated = _truncate(result.text, remaining)
         if not text.strip():
             continue
-        remaining -= len(text)
-        label = f"E{index}"
-        items.append(
-            EvidenceItem(label=label, result=result, text=text, truncated=truncated)
-        )
+        dedupe_key = (result.document_id, " ".join(text.split()).casefold())
+        if dedupe_key in seen_text:
+            limitations.append(
+                "Repeated text from the same document was omitted from the model "
+                "context."
+            )
+            continue
+        label = f"E{len(items) + 1}"
+        item = EvidenceItem(label=label, result=result, text=text, truncated=truncated)
+
+        def fits(candidate: EvidenceItem) -> bool:
+            if max_total_tokens is None:
+                return True
+            prompt_bytes = len(
+                (
+                    SYSTEM_PROMPT.encode("utf-8")
+                    + build_prompt(question, [*items, candidate]).encode("utf-8")
+                )
+            )
+            return prompt_bytes + output_reserve + 16 <= max_total_tokens
+
+        if not fits(item):
+            low, high = 0, len(text)
+            best: EvidenceItem | None = None
+            while low <= high:
+                middle = (low + high) // 2
+                shortened, _ = _truncate(text, middle)
+                candidate = EvidenceItem(
+                    label=label,
+                    result=result,
+                    text=shortened,
+                    truncated=True,
+                )
+                if shortened.strip() and fits(candidate):
+                    best = candidate
+                    low = middle + 1
+                else:
+                    high = middle - 1
+            if best is None:
+                limitations.append(
+                    "Additional retrieved evidence was left out to stay within the "
+                    "model context limit."
+                )
+                break
+            item = best
+            truncated = True
+
+        items.append(item)
+        seen_text.add(dedupe_key)
+        remaining -= len(item.text)
         if truncated:
             limitations.append(
                 f"Evidence from '{result.filename}' page {result.page_number} was "
@@ -364,17 +424,21 @@ class QAService:
     def __init__(
         self,
         retrieval: RetrievalService,
-        ollama: OllamaService,
+        llm: BaseLLMProvider,
         *,
         default_top_k: int = 5,
         max_context_chars: int = 6000,
+        llm_num_ctx: int = 8192,
+        llm_num_predict: int = 1024,
         verifier: CitationVerifier | None = None,
         sufficiency: EvidenceSufficiencyEngine | None = None,
     ) -> None:
         self._retrieval = retrieval
-        self._ollama = ollama
+        self._llm = llm
         self._default_top_k = default_top_k
         self._max_context_chars = max_context_chars
+        self._llm_num_ctx = llm_num_ctx
+        self._llm_num_predict = llm_num_predict
         self._verifier = verifier
         self._sufficiency = sufficiency or get_evidence_sufficiency_engine()
 
@@ -398,7 +462,13 @@ class QAService:
         if not precheck.proceed:
             return self._abstain(question, precheck=precheck)
 
-        items, limitations = build_evidence(results, self._max_context_chars)
+        items, limitations = build_evidence(
+            results,
+            self._max_context_chars,
+            question=question,
+            max_total_tokens=self._llm_num_ctx,
+            output_reserve=self._llm_num_predict,
+        )
         if not items:
             return self._abstain(question, results, precheck=precheck)
 
@@ -407,10 +477,10 @@ class QAService:
             "QA request: %s evidence items, %s prompt chars, model=%s",
             len(items),
             len(prompt),
-            self._ollama.model,
+            self._llm.model,
         )
 
-        raw = await self._ollama.generate(
+        raw = await self._llm.generate(
             prompt, system=SYSTEM_PROMPT, response_format="json"
         )
         parsed = parse_llm_answer(raw)
@@ -422,6 +492,22 @@ class QAService:
             limitations.extend(notes)
 
         claims, verification_status = self._verify(claims, items)
+
+        if precheck.relevant_chunks == 0 and verification_status == "contradicted":
+            logger.info(
+                "Discarding contradiction verdict without question-relevant "
+                "retrieved evidence"
+            )
+            return self._abstain(
+                question,
+                results,
+                precheck=PrecheckResult(
+                    False,
+                    "no_relevant_evidence",
+                    relevant_chunks=0,
+                    best_semantic_score=precheck.best_semantic_score,
+                ),
+            )
 
         # Stage 2: the decision gate. It consumes the verification results, so
         # the LLM's own prose can never authorise its own answer.
@@ -446,12 +532,15 @@ class QAService:
             claims=claims,
             limitations=_dedupe(limitations + parsed.limitations),
             retrieval=results,
-            model=self._ollama.model,
+            model=self._llm.model,
             verification_status=verification_status,
             decision=assessment.decision.value,
             missing_information=assessment.report.missing_information,
             conflicts=[conflict.to_dict() for conflict in assessment.report.conflicts],
             evidence_gap_report=assessment.report.to_dict(),
+            faithfulness=calculate_faithfulness(
+                assessment.answer, claims, decision=assessment.decision.value
+            ),
         )
 
     def _abstain(
@@ -476,10 +565,13 @@ class QAService:
             claims=[],
             limitations=[assessment.reason_text],
             retrieval=list(results or []),
-            model=self._ollama.model,
+            model=self._llm.model,
             verification_status="not_verified",
             decision=Decision.ABSTAIN.value,
             evidence_gap_report=assessment.report.to_dict(),
+            faithfulness=calculate_faithfulness(
+                assessment.answer, [], decision=Decision.ABSTAIN.value
+            ),
         )
 
     def _verify(
@@ -596,12 +688,14 @@ def _dedupe(values: list[str]) -> list[str]:
 
 
 def get_qa_service() -> QAService:
-    """Process-wide QA service using the configured retrieval and Ollama."""
+    """Process-wide QA service using the configured retrieval and OpenRouter."""
     settings = get_settings()
     return QAService(
         get_retrieval_service(),
-        get_ollama_service(),
+        get_llm_service(),
         default_top_k=settings.qa_top_k,
         max_context_chars=settings.qa_max_context_chars,
+        llm_num_ctx=settings.llm_num_ctx,
+        llm_num_predict=settings.llm_num_predict,
         sufficiency=get_evidence_sufficiency_engine(),
     )

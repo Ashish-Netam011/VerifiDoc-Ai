@@ -6,6 +6,8 @@
  *   GET  /api/documents/{id}             -> DocumentMetadata
  *   GET  /api/documents/{id}/chunks      -> { document_id, filename, page_count,
  *                                             chunk_count, chunks: ChunkModel[] }
+ *   GET  /api/documents/{id}/tables      -> { document_id, filename,
+ *                                             table_count, tables: ExtractedTable[] }
  *   POST /api/documents/upload           -> 201 DocumentMetadata
  *
  * DocumentMetadata: document_id, filename, file_path, page_count, uploaded_at,
@@ -72,6 +74,22 @@ export async function getDocumentChunks(documentId, {
     throw new ApiError({
       kind: 'parse',
       message: 'The document chunks could not be read.',
+      url: path,
+    })
+  }
+  return payload
+}
+
+export async function getDocumentTables(documentId, {
+  signal,
+  timeoutMs = DEFAULT_TIMEOUTS.documents,
+} = {}) {
+  const path = documentPath(documentId, '/tables')
+  const payload = requireObject(await request(path, { timeoutMs, signal }), path)
+  if (!Array.isArray(payload.tables)) {
+    throw new ApiError({
+      kind: 'parse',
+      message: 'The extracted tables could not be read.',
       url: path,
     })
   }

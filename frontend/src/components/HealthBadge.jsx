@@ -7,7 +7,7 @@ const BADGE_STYLES = {
   offline: { dot: 'bg-rose-500', text: 'text-rose-700', label: 'Backend unreachable' },
 }
 
-function describe({ status, health, error, backendAvailable, ollamaAvailable, modelPresent }) {
+function describe({ status, health, error, backendAvailable, providerAvailable, modelPresent }) {
   if (status === 'healthy') {
     return health?.model ? `Ready · ${health.model}` : 'Ready'
   }
@@ -15,7 +15,7 @@ function describe({ status, health, error, backendAvailable, ollamaAvailable, mo
     if (!backendAvailable && !health) {
       return error?.message ?? 'Backend reported a problem'
     }
-    if (!ollamaAvailable) return 'Ollama is not reachable'
+    if (!providerAvailable) return 'LLM provider is not available'
     if (!modelPresent) return health?.model ? `Model missing · ${health.model}` : 'Model missing'
     return health?.detail || 'Backend degraded'
   }
