@@ -14,6 +14,11 @@ import numpy as np
 from app.config import get_settings
 from app.services.embedding_service import get_embedding_service
 from app.services.nli_service import get_nli_service
+from app.ragas_style import (
+    answer_relevancy,
+    build_report as build_ragas_style_report,
+    context_precision_ranked,
+)
 from app.services.qa_service import get_qa_service
 from app.services.retrieval_service import RetrievalResult
 
@@ -88,15 +93,18 @@ def score_case(
 
     context_precision = None
     context_recall = None
+    precision_ranked = None
     if required_facts:
-        relevant_contexts = sum(
+        context_relevance = [
             any(
                 score.entailment >= entailment_threshold
                 or score.contradiction >= contradiction_threshold
                 for score in context_scores
             )
             for context_scores in matrix
-        )
+        ]
+        relevant_contexts = sum(context_relevance)
+        precision_ranked = context_precision_ranked(context_relevance)
         context_precision = relevant_contexts / len(contexts) if contexts else 0.0
         supported_facts = sum(
             any(
@@ -119,7 +127,9 @@ def score_case(
         "faithfulness": faithfulness,
         "answer_relevance_e5_cosine": answer_relevance,
         "context_precision_nli": context_precision,
+        "context_precision_ranked": precision_ranked,
         "context_recall_nli": context_recall,
+        "answer_relevancy_generated": None,
         "retrieved_context_count": len(contexts),
         "required_fact_count": len(required_facts),
     }
@@ -133,6 +143,8 @@ async def run_evaluation(
     nli_service: Any | None = None,
     entailment_threshold: float | None = None,
     contradiction_threshold: float | None = None,
+    ragas_style: bool = False,
+    llm: Any | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
     qa_service = qa_service or get_qa_service()
@@ -149,19 +161,35 @@ async def run_evaluation(
         else contradiction_threshold
     )
 
+    # Answer relevancy is the only RAGAS-style metric that needs a language
+    # model, so the caller opts in explicitly (and pays for the extra calls).
+    if ragas_style and llm is None:
+        from app.services.llm_service import get_llm_service
+
+        llm = get_llm_service()
+
     case_results = []
     for case in cases:
         answer = await qa_service.answer(str(case["question"]))
-        case_results.append(
-            score_case(
-                case,
-                answer,
-                embedding_service=embedding_service,
-                nli_service=nli_service,
-                entailment_threshold=entailment_threshold,
-                contradiction_threshold=contradiction_threshold,
-            )
+        row = score_case(
+            case,
+            answer,
+            embedding_service=embedding_service,
+            nli_service=nli_service,
+            entailment_threshold=entailment_threshold,
+            contradiction_threshold=contradiction_threshold,
         )
+        if ragas_style:
+            relevancy = await answer_relevancy(
+                str(case["question"]),
+                answer.answer,
+                llm=llm,
+                embedding_service=embedding_service,
+            )
+            row["answer_relevancy_generated"] = relevancy["score"]
+            row["answer_relevancy_reason"] = relevancy["reason"]
+            row["answer_relevancy_questions"] = relevancy["generated_questions"]
+        case_results.append(row)
 
     def average(key: str) -> float | None:
         values = [row[key] for row in case_results if row[key] is not None]
@@ -174,6 +202,7 @@ async def run_evaluation(
         "answer_relevance_e5_cosine": average("answer_relevance_e5_cosine"),
         "context_precision_nli": average("context_precision_nli"),
         "context_recall_nli": average("context_recall_nli"),
+        "ragas_style": build_ragas_style_report(case_results),
         "cases": case_results,
         "metric_notes": {
             "faithfulness": "Fraction of generated claims marked supported by runtime citation verification.",
@@ -190,9 +219,19 @@ def main() -> None:
     default_dataset = Path(__file__).resolve().parents[1] / "evaluation" / "cases.jsonl"
     parser.add_argument("--dataset", type=Path, default=default_dataset)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--ragas-style",
+        action="store_true",
+        help=(
+            "Also compute RAGAS-style answer relevancy (needs a language "
+            "model; costs one extra model call per case)."
+        ),
+    )
     args = parser.parse_args()
 
-    report = asyncio.run(run_evaluation(load_cases(args.dataset)))
+    report = asyncio.run(
+        run_evaluation(load_cases(args.dataset), ragas_style=args.ragas_style)
+    )
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     if args.output:
         args.output.write_text(rendered + "\n", encoding="utf-8")

@@ -54,8 +54,15 @@ class StubRetrieval:
         self.results = results
         self.calls: list[dict] = []
 
-    def search(self, query, *, top_k=6, document_id=None):
-        self.calls.append({"query": query, "top_k": top_k, "document_id": document_id})
+    def search(self, query, *, top_k=6, document_id=None, max_per_document=None):
+        self.calls.append(
+            {
+                "query": query,
+                "top_k": top_k,
+                "document_id": document_id,
+                "max_per_document": max_per_document,
+            }
+        )
         return list(self.results)
 
 

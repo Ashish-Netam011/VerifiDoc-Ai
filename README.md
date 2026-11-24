@@ -183,6 +183,7 @@ Defined in `backend/.env` (template: `backend/.env.example`).
 | `DATA_DIR` | `../data` (backend-relative, resolves to `E:\Desktop\ProofLens\data`) |
 | `MAX_UPLOAD_MB` | `25` |
 | `TOP_K` | `6` |
+| `QA_MAX_CHUNKS_PER_DOCUMENT` | `2`: at most this many chunks per document in one unscoped answer, so cross-document questions are not answered from a single file; `0` disables it |
 | `LLM_TIMEOUT_SECONDS` | `45` per provider request |
 | `CORS_ORIGINS` | `http://localhost:5173` |
 
@@ -259,6 +260,8 @@ Member 2 owns the only machine that needs the AI models. Members 1 and 3 do not 
 | Start frontend | `cd frontend && npm run dev` |
 | Build frontend | `cd frontend && npm run build` |
 | Run tests | `cd backend && pytest` |
+| Retrieval benchmark (recall@k, MRR, nDCG, per strategy) | `cd backend && python -m app.benchmark` |
+| Q&A evaluation, RAGAS-style metrics | `cd backend && python -m app.evaluation --ragas-style` |
 
 ### License
 

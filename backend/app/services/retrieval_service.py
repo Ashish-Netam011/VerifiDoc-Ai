@@ -29,6 +29,14 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_RRF_K = 60
 DEFAULT_TOP_K = 6
+
+# Retrieval ablations measured by the offline benchmark (app/benchmark.py).
+# "hybrid_rerank" is the production path and the default; the others exist so
+# each stage can be measured in isolation.
+SEARCH_STRATEGIES = ("semantic", "keyword", "hybrid", "hybrid_rerank")
+DEFAULT_STRATEGY = "hybrid_rerank"
+
+
 @dataclass(frozen=True)
 class RetrievalResult:
     """A fused search hit with the evidence needed for later phases."""
@@ -77,6 +85,46 @@ def reciprocal_rank_fusion(
             seen.add(chunk_id)
             scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (k + rank)
     return scores
+
+
+def _apply_document_cap(
+    results: Sequence[RetrievalResult],
+    limit: int,
+    max_per_document: int | None,
+) -> list[RetrievalResult]:
+    """Keep at most ``max_per_document`` hits per document, then top up.
+
+    A single-document pool is returned unchanged: the cap exists so a question
+    that spans several documents cannot be answered entirely from one of them.
+    If the cap cannot fill ``limit``, the remaining slots come from the
+    higher-ranked hits it skipped, so the caller never receives fewer results.
+    """
+    ranked = list(results)
+    if max_per_document is None or max_per_document <= 0:
+        return ranked[:limit]
+    if len({result.document_id for result in ranked}) <= 1:
+        return ranked[:limit]
+
+    selected: list[RetrievalResult] = []
+    overflow: list[RetrievalResult] = []
+    per_document: dict[str, int] = {}
+    for result in ranked:
+        if len(selected) >= limit:
+            break
+        used = per_document.get(result.document_id, 0)
+        if used < max_per_document:
+            selected.append(result)
+            per_document[result.document_id] = used + 1
+        else:
+            overflow.append(result)
+    for result in overflow:
+        if len(selected) >= limit:
+            break
+        selected.append(result)
+
+    # Restore rank order: an overflow hit must not jump ahead of a better one.
+    order = {result.chunk_id: rank for rank, result in enumerate(ranked)}
+    return sorted(selected, key=lambda result: order[result.chunk_id])
 
 
 class RetrievalService:
@@ -147,41 +195,66 @@ class RetrievalService:
         *,
         top_k: int | None = None,
         document_id: str | None = None,
+        strategy: str = DEFAULT_STRATEGY,
+        max_per_document: int | None = None,
     ) -> list[RetrievalResult]:
-        """Hybrid search; raises ``ValueError`` for a blank query."""
+        """Search one corpus; raises ``ValueError`` for a blank query.
+
+        ``strategy`` selects which stages run, so the offline benchmark can
+        measure each one: ``semantic`` (E5 only), ``keyword`` (BM25 only),
+        ``hybrid`` (RRF fusion, no rerank) and ``hybrid_rerank`` (production).
+
+        ``max_per_document`` spreads the results across documents so a question
+        covering several documents is not answered from just one of them. It is
+        a no-op when the candidate pool holds a single document.
+        """
         if not isinstance(query, str) or not query.strip():
             raise ValueError("Search query must not be empty.")
         query = query.strip()
+        if strategy not in SEARCH_STRATEGIES:
+            raise ValueError(
+                f"strategy must be one of {', '.join(SEARCH_STRATEGIES)}"
+            )
 
         limit = top_k if top_k is not None else self._default_top_k
         if limit <= 0:
             raise ValueError("top_k must be positive.")
         depth = self._candidate_depth(limit, filtered=document_id is not None)
 
+        use_semantic = strategy in {"semantic", "hybrid", DEFAULT_STRATEGY}
+        use_keyword = strategy in {"keyword", "hybrid", DEFAULT_STRATEGY}
+
         # Semantic candidates (embedding errors propagate to the API layer).
-        query_vector = self._embedding.embed_query(query)
-        semantic_hits: list[SearchResult] = self._vectors.search(
-            query_vector, top_k=max(depth, 1)
-        )
-        if document_id is not None:
-            semantic_hits = [
-                hit
-                for hit in semantic_hits
-                if str(hit.metadata.get("document_id") or "") == document_id
-            ]
-        semantic_hits = semantic_hits[:depth]
+        semantic_hits: list[SearchResult] = []
+        if use_semantic:
+            query_vector = self._embedding.embed_query(query)
+            semantic_hits = self._vectors.search(
+                query_vector, top_k=max(depth, 1)
+            )
+            if document_id is not None:
+                semantic_hits = [
+                    hit
+                    for hit in semantic_hits
+                    if str(hit.metadata.get("document_id") or "") == document_id
+                ]
+            semantic_hits = semantic_hits[:depth]
 
         # Keyword candidates.
-        bm25_hits: list[BM25Result] = self._bm25.search(
-            query, top_k=depth, document_id=document_id
-        )
+        bm25_hits: list[BM25Result] = []
+        if use_keyword:
+            bm25_hits = self._bm25.search(
+                query, top_k=depth, document_id=document_id
+            )
 
         semantic_by_id = {hit.chunk_id: hit for hit in semantic_hits}
         bm25_by_id = {hit.chunk_id: hit for hit in bm25_hits}
 
-        fused = reciprocal_rank_fusion(
-            [list(semantic_by_id), list(bm25_by_id)], k=self._rrf_k
-        )
+        rankings: list[list[str]] = []
+        if semantic_by_id:
+            rankings.append(list(semantic_by_id))
+        if bm25_by_id:
+            rankings.append(list(bm25_by_id))
+        fused = reciprocal_rank_fusion(rankings, k=self._rrf_k)
         if not fused:
             return []
 
@@ -197,12 +270,13 @@ class RetrievalService:
                 chunk_id,
             ),
         )
-        rerank_limit = (
-            max(limit, self._rerank_candidate_k)
-            if self._reranker is not None
-            else limit
-        )
-        ordered = ordered_candidates[:rerank_limit]
+        rerank = strategy == DEFAULT_STRATEGY and self._reranker is not None
+        pool_size = max(limit, self._rerank_candidate_k) if rerank else limit
+        if max_per_document is not None and max_per_document > 0:
+            # The cap needs candidates to spread over; truncating to ``limit``
+            # first would leave it nothing to draw a second document from.
+            pool_size = max(pool_size, self._retrieval_candidate_k)
+        ordered = ordered_candidates[:pool_size]
 
         metadata: dict[str, dict[str, Any]] = {}
         for chunk_id in ordered:
@@ -250,8 +324,8 @@ class RetrievalService:
                     },
                 )
             )
-        if self._reranker is None or not results:
-            return results[:limit]
+        if not rerank or not results:
+            return _apply_document_cap(results, limit, max_per_document)
 
         reranker_scores = self._reranker.score(
             query, [result.text for result in results]
@@ -282,7 +356,7 @@ class RetrievalService:
                 result.chunk_id,
             )
         )
-        return reranked[:limit]
+        return _apply_document_cap(reranked, limit, max_per_document)
 
 
 _service: RetrievalService | None = None

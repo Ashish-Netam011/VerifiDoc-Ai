@@ -75,6 +75,10 @@ class Settings(BaseModel):
     # Evidence-grounded answering.
     qa_top_k: int = Field(default=5, ge=1, le=20)
     qa_max_context_chars: int = Field(default=6000, ge=500, le=40_000)
+    # Cross-document coverage: at most N chunks per document in one answer, so a
+    # question spanning several documents cannot be answered from just one.
+    # The cap never applies to a single-document candidate pool. 0 disables it.
+    qa_max_chunks_per_document: int = Field(default=2, ge=0, le=50)
     # Citation verification (NLI). Thresholds are on the model's softmax
     # outputs, not calibrated probabilities - see the Phase 3.2 report.
     nli_model: str = Field(default="cross-encoder/nli-deberta-base")
@@ -228,6 +232,7 @@ def _load_settings() -> Settings:
         rrf_k=_env("RRF_K", "60"),
         qa_top_k=_env("QA_TOP_K", "5"),
         qa_max_context_chars=_env("QA_MAX_CONTEXT_CHARS", "6000"),
+        qa_max_chunks_per_document=_env("QA_MAX_CHUNKS_PER_DOCUMENT", "2"),
         nli_model=_env("NLI_MODEL", "cross-encoder/nli-deberta-base"),
         nli_batch_size=_env("NLI_BATCH_SIZE", "8"),
         nli_entailment_threshold=_env("NLI_ENTAILMENT_THRESHOLD", "0.60"),
